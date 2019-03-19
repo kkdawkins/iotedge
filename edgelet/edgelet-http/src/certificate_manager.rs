@@ -1,4 +1,8 @@
 use std::sync::{Arc, RwLock};
+use std::time::{Duration, Instant};
+
+use tokio::prelude::*;
+use tokio::timer::Interval;
 
 use edgelet_core::crypto::{Certificate, CreateCertificate};
 use edgelet_core::CertificateProperties;
@@ -35,20 +39,13 @@ impl<C: CreateCertificate + Clone> CertificateManager<C> {
             }
         }
 
-        // No valid cert so must create
-        let mut cert = self
-            .certificate
-            .write()
-            .expect("Locking the certificate for write failed.");
-
-        if let Some(cert) = cert.as_ref() {
-            Ok(cert.to_string())
-        } else {
-            let new_cert = self
-                .create_cert()
-                .with_context(|_| ErrorKind::CertificateCreationError)?;
-            Ok(cert.get_or_insert(new_cert).to_string())
-        }
+        // Every (Cert Validity) - 1 hour, update the cert starting now.
+        let update_task = Interval::new(Instant::now(), Duration::from_secs(self.props.validity_in_secs() - 3600))
+            .for_each(|_| {
+                self.update_cert()
+            })
+            .map_err(|e| Error::from(kind: ErrorKind::CertificateCreationError));
+        tokio::run(update_task);
     }
 
     fn create_cert(&self) -> Result<String, Error> {
@@ -65,6 +62,23 @@ impl<C: CreateCertificate + Clone> CertificateManager<C> {
             .with_context(|_| ErrorKind::CertificateCreationError)?;
 
         Ok(cert_str)
+    }
+
+    fn update_cert(&self) -> Result {
+        // No valid cert so must create
+        let mut cert = self
+            .certificate
+            .write()
+            .expect("Locking the certificate for write failed.");
+
+        if let Some(cert) = cert.as_ref() {
+            Ok(cert.to_string())
+        } else {
+            let new_cert = self
+                .create_cert()
+                .with_context(|_| ErrorKind::CertificateCreationError)?;
+            Ok(cert.get_or_insert(new_cert).to_string())
+        }
     }
 
     #[cfg(test)]
